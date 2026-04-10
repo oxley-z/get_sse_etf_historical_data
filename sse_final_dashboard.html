@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>上交所宽基 ETF 规模监控</title>
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+  <style>
+    body {
+      background-color: #f5f7fa;
+      color: #333;
+      font-family: 'PingFang SC', 'Segoe UI', sans-serif;
+      margin: 0;
+      padding: 20px;
+    }
+    h2 {
+      text-align: center;
+      color: #2c3e50;
+      font-weight: 500;
+      margin-bottom: 20px;
+    }
+    .tabs-container {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+      margin-bottom: 20px;
+      width: 95%;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .etf-block {
+      padding: 10px 18px;
+      background-color: #fff;
+      border: 1px solid #dcdfe6;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 14px;
+      color: #606266;
+      transition: all 0.2s ease;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+    }
+    .etf-block:hover  { border-color: #409EFF; color: #409EFF; }
+    .etf-block.active {
+      background-color: #409EFF;
+      color: #fff;
+      border-color: #409EFF;
+      font-weight: bold;
+      box-shadow: 0 4px 8px rgba(64,158,255,0.3);
+    }
+    .chart-container {
+      width: 95%;
+      height: 650px;
+      margin: 0 auto;
+      background-color: #fff;
+      padding: 20px;
+      border-radius: 12px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.05);
+    }
+  </style>
+</head>
+<body>
+  <h2>上交所宽基 ETF 规模监控看板（近5个交易日 / 单位：万份）</h2>
+  <div class="tabs-container" id="tabs"></div>
+  <div class="chart-container" id="chart"></div>
+
+  <script>
+    var rawData = [{"x": ["2026-04-02", "2026-04-03", "2026-04-07", "2026-04-08", "2026-04-09"], "y": [4471878.77, 4486908.77, 4505268.77, 4516518.77, 4476378.77], "name": "华泰柏瑞沪深300ETF(510300)", "mode": "lines+markers", "line": {"width": 2.5}, "marker": {"size": 6}, "connectgaps": false}, {"x": ["2026-04-02", "2026-04-03", "2026-04-07", "2026-04-08", "2026-04-09"], "y": [3163384.4, 3163744.4, 3164014.4, 3165814.4, 3156544.4], "name": "易方达沪深300ETF(510310)", "mode": "lines+markers", "line": {"width": 2.5}, "marker": {"size": 6}, "connectgaps": false}, {"x": ["2026-04-02", "2026-04-03", "2026-04-07", "2026-04-08", "2026-04-09"], "y": [1940424.98, 1941054.98, 1942044.98, 1942584.98, 1934484.98], "name": "华夏沪深300ETF(510330)", "mode": "lines+markers", "line": {"width": 2.5}, "marker": {"size": 6}, "connectgaps": false}, {"x": ["2026-04-02", "2026-04-03", "2026-04-07", "2026-04-08", "2026-04-09"], "y": [2286246.68, 2297586.68, 2300466.68, 2315226.68, 2296326.68], "name": "华夏上证50ETF(510050)", "mode": "lines+markers", "line": {"width": 2.5}, "marker": {"size": 6}, "connectgaps": false}, {"x": ["2026-04-02", "2026-04-03", "2026-04-07", "2026-04-08", "2026-04-09"], "y": [931536.86, 944416.86, 963816.86, 1057576.86, 1015296.86], "name": "南方中证500ETF(510500)", "mode": "lines+markers", "line": {"width": 2.5}, "marker": {"size": 6}, "connectgaps": false}, {"x": ["2026-04-02", "2026-04-03", "2026-04-07", "2026-04-08", "2026-04-09"], "y": [741921.76, 755721.76, 782321.76, 877521.76, 813521.76], "name": "南方中证1000ETF(512100)", "mode": "lines+markers", "line": {"width": 2.5}, "marker": {"size": 6}, "connectgaps": false}, {"x": ["2026-04-02", "2026-04-03", "2026-04-07", "2026-04-08", "2026-04-09"], "y": [555905.77, 555955.77, 556155.77, 554455.77, 554155.77], "name": "华安上证180ETF(510180)", "mode": "lines+markers", "line": {"width": 2.5}, "marker": {"size": 6}, "connectgaps": false}, {"x": ["2026-04-02", "2026-04-03", "2026-04-07", "2026-04-08", "2026-04-09"], "y": [163862.17, 169862.17, 171862.17, 196462.17, 178262.17], "name": "广发中证1000ETF(560010)", "mode": "lines+markers", "line": {"width": 2.5}, "marker": {"size": 6}, "connectgaps": false}, {"x": ["2026-04-02", "2026-04-03", "2026-04-07", "2026-04-08", "2026-04-09"], "y": [2895762.81, 2908662.81, 2894562.81, 2849262.81, 2863662.81], "name": "易方达上证科创板50ETF(588080)", "mode": "lines+markers", "line": {"width": 2.5}, "marker": {"size": 6}, "connectgaps": false}];
+
+    var layout = {
+      paper_bgcolor: '#ffffff',
+      plot_bgcolor:  '#ffffff',
+      title:  { text: '总体汇总视图', font: {size: 18} },
+      xaxis:  {
+        title: '统计日期（YYYY-MM-DD）',
+        type:  'category',
+        tickmode: 'linear',
+        dtick:    1,
+        tickangle: -45,
+        gridcolor: '#f0f0f0'
+      },
+      yaxis:  { title: '规模（万份）', gridcolor: '#f0f0f0' },
+      hovermode: 'x unified',
+      legend: { orientation: 'v', x: 1.02, y: 1 },
+      margin: { t: 60, r: 150, b: 80, l: 60 }
+    };
+
+    Plotly.newPlot('chart', rawData, layout);
+
+    var tabsDiv = document.getElementById('tabs');
+
+    var btnAll = document.createElement('div');
+    btnAll.className   = 'etf-block active';
+    btnAll.textContent = '📊 总体汇总';
+    btnAll.onclick = function() {
+      document.querySelectorAll('.etf-block').forEach(b => b.classList.remove('active'));
+      this.classList.add('active');
+      Plotly.restyle('chart', {visible: true});
+      Plotly.relayout('chart', {title: '总体汇总视图'});
+    };
+    tabsDiv.appendChild(btnAll);
+
+    rawData.forEach(function(trace, index) {
+      var btn = document.createElement('div');
+      btn.className   = 'etf-block';
+      btn.textContent = trace.name.split('(')[0];
+      btn.onclick = function() {
+        document.querySelectorAll('.etf-block').forEach(b => b.classList.remove('active'));
+        this.classList.add('active');
+        var mask = rawData.map(function(_, i) { return i === index; });
+        Plotly.update('chart', {visible: mask}, {title: trace.name + ' 规模走势'});
+      };
+      tabsDiv.appendChild(btn);
+    });
+  </script>
+</body>
+</html>
