@@ -1,17 +1,21 @@
 """
-上交所宽基 ETF 规模监控 - 本地 Python 版（支持断点续传 + 断网自动保存）
+上交所宽基 ETF 规模监控（断点续传 + 断网保存 + 增量更新）
 依赖安装：pip install requests plotly openpyxl
 
 运行方式：python sse_etf_dashboard.py
-  - 首次运行  ：从今天起向前抓取，每成功抓一天自动保存进度
-  - Ctrl+C    ：捕获中断，保存进度，生成当前数据预览
-  - 断网中断  ：连续网络失败超过阈值自动停止，保存进度，生成预览
-  - 再次运行  ：自动读取断点，从上次最早日期继续向前抓取
-  - 抓取完毕  ：生成最终 HTML + Excel，断点文件永久保留
+脚本启动时自动判断运行模式：
 
-输出文件：sse_final_dashboard.html   交互图表（自动在浏览器打开）
-         sse_etf_data.xlsx           历史数据（透视表 + 明细表）
-进度文件：sse_checkpoint.json        断点缓存（永久保留，续传 / 备份均可用）
+  【历史下载模式】无 checkpoint 或历史尚未抓完
+    从今天/断点起向过去方向逐日抓至 2020-01-01
+    每成功一天立即写断点；Ctrl+C 或断网自动保存
+
+  【增量更新模式】checkpoint 存在且 note 含"完成"
+    找到已有数据的最新日期，从次日起正向抓到今天
+    新数据追加合并，重新生成 HTML + Excel
+
+输出：sse_final_dashboard.html  交互图表
+      sse_etf_data.xlsx         历史数据（透视表 + 明细表）
+      sse_checkpoint.json       进度文件（永久保留）
 """
 
 import requests
@@ -24,7 +28,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-# ── 1. 配置区 ──────────────────────────────────────────────────────────────────
+# ── 1. 配置 ────────────────────────────────────────────────────────────────────
 
 ETF_MAP = {
     '510300': '华泰柏瑞沪深300ETF',
@@ -38,13 +42,13 @@ ETF_MAP = {
     '588080': '易方达上证科创板50ETF',
 }
 
-TARGET_DAYS       = 1500             # 2020至今约1500个交易日
-CUTOFF_DATE       = datetime(2020, 1, 1)
-OUTPUT_HTML       = 'sse_final_dashboard.html'
-OUTPUT_EXCEL      = 'sse_etf_data.xlsx'
-CHECKPOINT        = 'sse_checkpoint.json'  # 断点进度文件（永久保留）
-MAX_NET_FAILURES  = 5                # 连续网络失败次数达到此值判定为断网
-NET_RETRY_WAIT    = 3                # 每次网络失败后的等待秒数
+TARGET_DAYS      = 1500
+CUTOFF_DATE      = datetime(2020, 1, 1)
+OUTPUT_HTML      = 'sse_final_dashboard.html'
+OUTPUT_EXCEL     = 'sse_etf_data.xlsx'
+CHECKPOINT       = 'sse_checkpoint.json'
+MAX_NET_FAILURES = 5
+NET_RETRY_WAIT   = 3
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -52,10 +56,9 @@ HEADERS = {
     'Accept':     '*/*',
 }
 
-# ── 2. 断点读写 ────────────────────────────────────────────────────────────────
+# ── 2. 断点工具 ────────────────────────────────────────────────────────────────
 
 def load_checkpoint():
-    """读取断点文件，返回 (results列表, 上次最早日期)。"""
     if not os.path.exists(CHECKPOINT):
         return [], None
     try:
@@ -64,22 +67,20 @@ def load_checkpoint():
         results   = data.get('results', [])
         last_date = data.get('last_date', None)
         note      = data.get('note', '')
-        print(f'📂 发现断点文件：{len(results)} 个交易日，最早日期 {last_date}，备注: {note}')
+        print(f'📂 断点文件：{len(results)} 个交易日 | 最早 {last_date} | 备注: {note}')
         return results, last_date
     except Exception as e:
-        print(f'  [警告] 断点文件读取失败，将重新开始: {e}')
+        print(f'  [警告] 断点文件读取失败，重新开始: {e}')
         return [], None
 
 
 def save_checkpoint(results, note=''):
-    """
-    原子写入断点文件（先写 .tmp 再重命名），永久保留不删除。
-    note: 记录保存原因，方便排查（如"断网"、"Ctrl+C"、"完成"）
-    """
+    """原子写入断点文件，永久保留。"""
     if not results:
         return
-    last_date  = min(r['date'] for r in results)
-    first_date = max(r['date'] for r in results)
+    dates     = [r['date'] for r in results]
+    last_date = min(dates)   # 最早（历史最远）
+    first_date = max(dates)  # 最新（最近今天）
     tmp = CHECKPOINT + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         json.dump({
@@ -90,13 +91,39 @@ def save_checkpoint(results, note=''):
             'note':       note,
             'results':    results,
         }, f, ensure_ascii=False)
-    os.replace(tmp, CHECKPOINT)   # 原子替换，防止写入中途崩溃损坏文件
+    os.replace(tmp, CHECKPOINT)
 
+
+def history_is_complete():
+    """checkpoint 存在且 note 含'完成'，认为历史数据已全量下载完毕。"""
+    if not os.path.exists(CHECKPOINT):
+        return False
+    try:
+        with open(CHECKPOINT, 'r', encoding='utf-8') as f:
+            return '完成' in json.load(f).get('note', '')
+    except Exception:
+        return False
+
+
+def read_latest_date():
+    """读取 checkpoint 中最新（最大）的日期，作为增量更新起点。"""
+    try:
+        with open(CHECKPOINT, 'r', encoding='utf-8') as f:
+            return json.load(f).get('first_date', None)
+    except Exception:
+        return None
+
+
+def read_all_results():
+    try:
+        with open(CHECKPOINT, 'r', encoding='utf-8') as f:
+            return json.load(f).get('results', [])
+    except Exception:
+        return []
 
 # ── 3. 网络请求 ────────────────────────────────────────────────────────────────
 
 def is_network_error(e):
-    """判断异常是否属于网络连通性故障（断网/超时/代理等）。"""
     msg = str(e).lower()
     return any(k in msg for k in (
         'connectionerror', 'timeout', 'max retries', 'connection reset',
@@ -107,21 +134,14 @@ def is_network_error(e):
 
 def fetch_day(date_str):
     """
-    抓取指定日期的 ETF 数据。
-    返回：
-      (items, 'ok')      — 成功，有数据
-      (None,  'nodata')  — 请求成功但无数据（非交易日）
-      (None,  'neterr')  — 网络连通性故障（断网/超时）
-      (None,  'apierr')  — 其他 API 错误
+    返回 (items,'ok') | (None,'nodata') | (None,'neterr') | (None,'apierr')
     """
     ts  = int(time.time() * 1000)
     url = (
         'https://query.sse.com.cn/commonQuery.do'
-        f'?isPagination=true'
-        f'&pageHelp.pageSize=1000'
+        f'?isPagination=true&pageHelp.pageSize=1000'
         f'&sqlId=COMMON_SSE_ZQPZ_ETFZL_XXPL_ETFGM_SEARCH_L'
-        f'&STAT_DATE={date_str}'
-        f'&_{ts}'
+        f'&STAT_DATE={date_str}&_{ts}'
     )
     try:
         resp  = requests.get(url, headers=HEADERS, timeout=10,
@@ -130,112 +150,170 @@ def fetch_day(date_str):
         items = resp.json().get('pageHelp', {}).get('data', [])
         return (items, 'ok') if items else (None, 'nodata')
     except Exception as e:
-        if is_network_error(e):
-            return (None, 'neterr')
-        print(f'  [API错误] {e}')
-        return (None, 'apierr')
+        return (None, 'neterr') if is_network_error(e) else (None, 'apierr')
 
 
-# ── 4. 采集主循环 ──────────────────────────────────────────────────────────────
+# ── 4. 通用抓取循环（供两种模式复用） ─────────────────────────────────────────
 
-def collect_trading_days():
+def fetch_dates(date_list, existing_dates, mode_label):
     """
-    断点续传采集主循环：
-    - 每成功一天立即写入断点文件
-    - Ctrl+C      → 保存进度 + 生成预览
-    - 断网         → 连续失败 ≥ MAX_NET_FAILURES 自动保存退出
-    - 正常完成     → 保存最终断点（永久保留）
-    返回 (results列表, 是否完整完成)
+    对 date_list 中尚未在 existing_dates 里的日期逐一抓取。
+    返回 (new_records列表, stop_reason)
+    stop_reason: 'completed' | 'network' | 'interrupt'
     """
-    results, last_date = load_checkpoint()
-    existing_dates     = {r['date'] for r in results}
-
-    if last_date:
-        start_from = datetime.strptime(last_date, '%Y-%m-%d') - timedelta(days=1)
-        print(f'▶  从断点继续，起始日期: {start_from.strftime("%Y-%m-%d")}')
-    else:
-        start_from = datetime.today()
-        print(f'▶  首次运行，从今天起向前追溯')
-
-    print(f'   目标: {TARGET_DAYS} 个交易日  |  截止: {CUTOFF_DATE.strftime("%Y-%m-%d")}')
-    print('   提示: Ctrl+C 可随时中断并保存进度')
-    print('=' * 60)
-
+    new_records    = []
     net_fail_count = 0
     stop_reason    = 'completed'
-    d              = start_from
 
     try:
-        while len(results) < TARGET_DAYS:
-            if d < CUTOFF_DATE:
-                print('✅ 已到达截止日期 2020-01-01，采集完成。')
-                break
-
-            date_str = d.strftime('%Y-%m-%d')
-
-            # 跳过断点中已有的日期
+        for date_str in date_list:
             if date_str in existing_dates:
-                d -= timedelta(days=1)
                 continue
 
-            print(f'同步 {date_str} ... (已获取 {len(results)}/{TARGET_DAYS})', end='  ')
+            print(f'同步 {date_str} [{mode_label}，已新增 {len(new_records)} 天]', end='  ')
             items, status = fetch_day(date_str)
 
             if status == 'ok':
-                results.append({'date': date_str, 'items': items})
-                existing_dates.add(date_str)
-                save_checkpoint(results, note='运行中')
+                new_records.append({'date': date_str, 'items': items})
                 net_fail_count = 0
                 print('✓')
-                d -= timedelta(days=1)
 
             elif status == 'nodata':
                 net_fail_count = 0
                 print('— (非交易日)')
-                d -= timedelta(days=1)
 
             elif status == 'neterr':
                 net_fail_count += 1
-                print(f'✗ 网络异常 (连续失败 {net_fail_count}/{MAX_NET_FAILURES})')
+                print(f'✗ 网络异常 ({net_fail_count}/{MAX_NET_FAILURES})')
                 if net_fail_count >= MAX_NET_FAILURES:
                     stop_reason = 'network'
                     break
                 time.sleep(NET_RETRY_WAIT)
-                # 不移动日期，下次重试同一天
+                continue   # 不移动，重试同一天
 
-            else:  # apierr
-                print('— (跳过)')
-                d -= timedelta(days=1)
+            else:
+                print('— (API错误，跳过)')
 
             time.sleep(0.4)
 
     except KeyboardInterrupt:
         stop_reason = 'interrupt'
+        print('\n\n⏸  Ctrl+C 捕获')
 
-    # ── 统一收尾 ──────────────────────────────────────────────────────────────
+    return new_records, stop_reason
+
+
+# ── 5. 历史下载模式 ────────────────────────────────────────────────────────────
+
+def collect_history():
+    """
+    从今天/断点起向过去方向逐日抓取，直到 CUTOFF_DATE 或 TARGET_DAYS。
+    返回 (results, completed布尔)
+    """
+    results, last_date = load_checkpoint()
+    existing_dates     = {r['date'] for r in results}
+
+    if last_date:
+        start = datetime.strptime(last_date, '%Y-%m-%d') - timedelta(days=1)
+        print(f'▶  历史下载（续传），从 {start.strftime("%Y-%m-%d")} 继续向前')
+    else:
+        start = datetime.today()
+        print(f'▶  历史下载（首次），从今天起向前追溯')
+
+    print(f'   目标 {TARGET_DAYS} 个交易日 | 截止 {CUTOFF_DATE.strftime("%Y-%m-%d")}')
+    print('   Ctrl+C 可随时中断并保存进度')
+    print('=' * 60)
+
+    # 生成待抓日期列表（倒序：从 start 到 CUTOFF_DATE）
+    date_list = []
+    d = start
+    while d >= CUTOFF_DATE and (len(existing_dates) + len(date_list)) < TARGET_DAYS:
+        date_list.append(d.strftime('%Y-%m-%d'))
+        d -= timedelta(days=1)
+
+    new_records, stop_reason = fetch_dates(date_list, existing_dates, '历史')
+
+    # 合并
+    for r in new_records:
+        results.append(r)
+        existing_dates.add(r['date'])
+        save_checkpoint(results, note='运行中')   # 实时持久化
+
     completed = (stop_reason == 'completed')
 
     if stop_reason == 'interrupt':
-        print(f'\n\n⏸  Ctrl+C 捕获，正在保存进度...')
         save_checkpoint(results, note='Ctrl+C 中断')
-        print(f'✅ 已保存 {len(results)} 个交易日 → {CHECKPOINT}')
-        print('   下次运行将从断点自动继续。')
-
+        print(f'✅ 已保存 {len(results)} 个交易日 → {CHECKPOINT}，下次运行自动续传')
     elif stop_reason == 'network':
-        print(f'\n\n🔌 检测到断网（连续 {MAX_NET_FAILURES} 次失败），自动保存进度...')
         save_checkpoint(results, note='断网自动保存')
-        print(f'✅ 已保存 {len(results)} 个交易日 → {CHECKPOINT}')
-        print('   恢复网络后重新运行脚本，将从断点继续。')
-
+        print(f'🔌 断网，已保存 {len(results)} 个交易日 → {CHECKPOINT}，恢复网络后重新运行')
     else:
-        # 正常完成，保留断点文件（需求：永久保留）
         save_checkpoint(results, note='全量采集完成')
-        print(f'✅ 已保存最终断点：{CHECKPOINT}（可作为历史数据备份）')
+        print(f'✅ 历史数据采集完成，共 {len(results)} 个交易日，断点文件永久保留')
 
     return results, completed
 
 
-# ── 5. 数据整理 ────────────────────────────────────────────────────────────────
+# ── 6. 增量更新模式 ────────────────────────────────────────────────────────────
+
+def incremental_update():
+    """
+    找到已有数据最新日期，从次日起正向抓到今天，追加合并后保存。
+    返回 (merged_results, new_count)
+    """
+    latest_str = read_latest_date()
+    if not latest_str:
+        print('❌ 无法读取已有最新日期，请检查断点文件。')
+        return [], 0
+
+    latest = datetime.strptime(latest_str, '%Y-%m-%d')
+    today  = datetime.today().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if latest >= today:
+        print(f'✅ 数据已是最新（{latest_str}），无需更新。')
+        return read_all_results(), 0
+
+    # 生成待检查日期（正向：latest+1 → today）
+    date_list, d = [], latest + timedelta(days=1)
+    while d <= today:
+        date_list.append(d.strftime('%Y-%m-%d'))
+        d += timedelta(days=1)
+
+    print(f'▶  增量更新模式')
+    print(f'   已有数据最新日期 : {latest_str}')
+    print(f'   待检查范围       : {date_list[0]} ~ {date_list[-1]}（{len(date_list)} 个自然日）')
+    print('   Ctrl+C 可随时中断，已抓到的新数据会保存')
+    print('=' * 60)
+
+    existing_results = read_all_results()
+    existing_dates   = {r['date'] for r in existing_results}
+
+    new_records, stop_reason = fetch_dates(date_list, existing_dates, '增量')
+
+    # 合并去重，保持倒序
+    merged_map = {r['date']: r for r in existing_results}
+    for r in new_records:
+        merged_map[r['date']] = r
+    merged_results = sorted(merged_map.values(), key=lambda x: x['date'], reverse=True)
+
+    new_count = len(new_records)
+    if new_count > 0:
+        if stop_reason == 'completed':
+            note = f'增量更新完成，新增 {new_count} 天'
+        else:
+            note = f'增量更新中断（{stop_reason}），已新增 {new_count} 天'
+        save_checkpoint(merged_results, note=note)
+        print(f'\n✅ 新增 {new_count} 个交易日，已合并保存 → {CHECKPOINT}')
+    else:
+        if stop_reason == 'completed':
+            print(f'\n✅ 检查完毕，期间暂无新交易日数据。')
+        else:
+            print(f'\n⚠  更新中断（{stop_reason}），未获取到新数据。')
+
+    return merged_results, new_count
+
+
+# ── 7. 数据整理 ────────────────────────────────────────────────────────────────
 
 def parse_val(v):
     if v is None:
@@ -252,12 +330,9 @@ def sniff_keys(sample):
         (k for k in keys if str(sample[k]).strip()[:2] in ('51', '56', '58')),
         'SEC_CODE'
     )
-    num_keys = [
-        k for k in keys
-        if k != code_key
-        and 'DATE' not in k.upper()
-        and parse_val(sample[k]) is not None
-    ]
+    num_keys = [k for k in keys if k != code_key
+                and 'DATE' not in k.upper()
+                and parse_val(sample[k]) is not None]
     val_key = (
         next((k for k in num_keys if any(kw in k.upper()
               for kw in ('VOL', 'FE', 'SHARE', '份额', '总量'))), None)
@@ -273,7 +348,6 @@ def build_plot_data(results):
         return []
     code_key, val_key = sniff_keys(results[0]['items'][0])
     print(f'字段嗅探 → 代码: {code_key}  |  数值: {val_key}')
-
     plot_data = []
     for code, name in ETF_MAP.items():
         dates, values = [], []
@@ -284,21 +358,16 @@ def build_plot_data(results):
             )
             dates.append(day['date'])
             values.append(parse_val(item[val_key]) if item else None)
-
         pairs = sorted(zip(dates, values), key=lambda x: x[0])
         plot_data.append({
-            'x':           [p[0] for p in pairs],
-            'y':           [p[1] for p in pairs],
-            'name':        f'{name}({code})',
-            'mode':        'lines+markers',
-            'line':        {'width': 2.5},
-            'marker':      {'size': 6},
-            'connectgaps': False,
+            'x': [p[0] for p in pairs], 'y': [p[1] for p in pairs],
+            'name': f'{name}({code})', 'mode': 'lines+markers',
+            'line': {'width': 2.5}, 'marker': {'size': 6}, 'connectgaps': False,
         })
     return plot_data
 
 
-# ── 6. Excel 导出 ──────────────────────────────────────────────────────────────
+# ── 8. Excel 导出 ──────────────────────────────────────────────────────────────
 
 HDR_FILL  = PatternFill('solid', start_color='1F4E79')
 SUB_FILL  = PatternFill('solid', start_color='2E75B6')
@@ -323,17 +392,16 @@ def sc(cell, font=None, fill=None, alignment=None, number_format=None, border=No
 
 def generate_excel(plot_data, output_path):
     wb        = Workbook()
-    all_dates = sorted({d for trace in plot_data for d in trace['x']})
+    all_dates = sorted({d for t in plot_data for d in t['x']})
     etf_names = [t['name'] for t in plot_data]
 
-    # Sheet 1：透视表（日期 × ETF）
-    ws1       = wb.active
+    # Sheet1 透视表
+    ws1 = wb.active
     ws1.title = '透视表（日期×ETF）'
-    ws1.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(etf_names) + 1)
+    ws1.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(etf_names)+1)
     sc(ws1.cell(row=1, column=1, value='上交所宽基 ETF 规模历史数据（单位：万份）'),
        font=HDR_FONT, fill=HDR_FILL, alignment=CENTER)
     ws1.row_dimensions[1].height = 30
-
     sc(ws1.cell(row=2, column=1, value='统计日期'),
        font=SUB_FONT, fill=SUB_FILL, alignment=CENTER, border=BORDER)
     for ci, name in enumerate(etf_names, start=2):
@@ -341,64 +409,55 @@ def generate_excel(plot_data, output_path):
            font=SUB_FONT, fill=SUB_FILL, alignment=CENTER, border=BORDER)
     ws1.row_dimensions[2].height = 22
 
-    date_to_row = {d: r for r, d in enumerate(all_dates, start=3)}
+    d2r = {d: r for r, d in enumerate(all_dates, start=3)}
     for date in all_dates:
-        r    = date_to_row[date]
-        fill = ALT_FILL if r % 2 == 0 else None
+        r = d2r[date]; fill = ALT_FILL if r % 2 == 0 else None
         sc(ws1.cell(row=r, column=1, value=date),
            font=BODY_FONT, fill=fill, alignment=CENTER, border=BORDER)
-
     for ci, trace in enumerate(plot_data, start=2):
         for date, val in zip(trace['x'], trace['y']):
-            r    = date_to_row[date]
-            fill = ALT_FILL if r % 2 == 0 else None
+            r = d2r[date]; fill = ALT_FILL if r % 2 == 0 else None
             sc(ws1.cell(row=r, column=ci, value=val),
                font=BODY_FONT, fill=fill, alignment=CENTER,
                number_format=NUM_FMT, border=BORDER)
-
     ws1.column_dimensions['A'].width = 16
-    for ci in range(2, len(etf_names) + 2):
+    for ci in range(2, len(etf_names)+2):
         ws1.column_dimensions[get_column_letter(ci)].width = 26
     ws1.freeze_panes = 'A3'
 
-    # Sheet 2：明细表
-    ws2        = wb.create_sheet('明细表')
-    headers    = ['ETF名称', '代码', '统计日期', '规模（万份）']
-    col_widths = [28, 12, 16, 18]
-
+    # Sheet2 明细表
+    ws2 = wb.create_sheet('明细表')
     ws2.merge_cells(start_row=1, start_column=1, end_row=1, end_column=4)
     sc(ws2.cell(row=1, column=1, value='上交所宽基 ETF 规模历史明细'),
        font=HDR_FONT, fill=HDR_FILL, alignment=CENTER)
     ws2.row_dimensions[1].height = 30
-
-    for ci, h in enumerate(headers, start=1):
+    for ci, h in enumerate(['ETF名称','代码','统计日期','规模（万份）'], start=1):
         sc(ws2.cell(row=2, column=ci, value=h),
            font=SUB_FONT, fill=SUB_FILL, alignment=CENTER, border=BORDER)
     ws2.row_dimensions[2].height = 22
 
     row = 3
     for trace in plot_data:
-        etf_name = trace['name'].split('(')[0]
-        etf_code = trace['name'].split('(')[1].rstrip(')')
+        name = trace['name'].split('(')[0]
+        code = trace['name'].split('(')[1].rstrip(')')
         for date, val in zip(trace['x'], trace['y']):
             fill = ALT_FILL if row % 2 == 0 else None
-            for ci, v in enumerate([etf_name, etf_code, date, val], start=1):
+            for ci, v in enumerate([name, code, date, val], start=1):
                 sc(ws2.cell(row=row, column=ci, value=v),
                    font=BODY_FONT, fill=fill,
                    alignment=LEFT_ALGN if ci == 1 else CENTER,
                    number_format=NUM_FMT if ci == 4 else None,
                    border=BORDER)
             row += 1
-
-    for ci, w in enumerate(col_widths, start=1):
+    for ci, w in enumerate([28, 12, 16, 18], start=1):
         ws2.column_dimensions[get_column_letter(ci)].width = w
     ws2.freeze_panes = 'A3'
 
     wb.save(output_path)
-    print(f'✅ Excel 已生成：{output_path}  （共 {row - 3} 行明细）')
+    print(f'✅ Excel 已生成：{output_path}  （共 {row-3} 行明细）')
 
 
-# ── 7. HTML 生成 ───────────────────────────────────────────────────────────────
+# ── 9. HTML 生成 ───────────────────────────────────────────────────────────────
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html>
@@ -407,30 +466,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <title>上交所宽基 ETF 规模监控</title>
   <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
   <style>
-    body {
-      background-color: #f5f7fa; color: #333;
-      font-family: 'PingFang SC', 'Segoe UI', sans-serif;
-      margin: 0; padding: 20px;
-    }
-    h2 { text-align: center; color: #2c3e50; font-weight: 500; margin-bottom: 20px; }
-    .tabs-container {
-      display: flex; flex-wrap: wrap; justify-content: center;
-      gap: 10px; width: 95%; margin: 0 auto 20px;
-    }
+    body { background:#f5f7fa; color:#333; font-family:'PingFang SC','Segoe UI',sans-serif; margin:0; padding:20px; }
+    h2   { text-align:center; color:#2c3e50; font-weight:500; margin-bottom:20px; }
+    .tabs-container { display:flex; flex-wrap:wrap; justify-content:center; gap:10px; width:95%; margin:0 auto 20px; }
     .etf-block {
-      padding: 10px 18px; background: #fff; border: 1px solid #dcdfe6;
-      border-radius: 8px; cursor: pointer; font-size: 14px; color: #606266;
-      transition: all 0.2s; box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+      padding:10px 18px; background:#fff; border:1px solid #dcdfe6;
+      border-radius:8px; cursor:pointer; font-size:14px; color:#606266;
+      transition:all .2s; box-shadow:0 2px 4px rgba(0,0,0,.02);
     }
-    .etf-block:hover  { border-color: #409EFF; color: #409EFF; }
-    .etf-block.active {
-      background: #409EFF; color: #fff; border-color: #409EFF;
-      font-weight: bold; box-shadow: 0 4px 8px rgba(64,158,255,0.3);
-    }
-    .chart-container {
-      width: 95%; height: 650px; margin: 0 auto; background: #fff;
-      padding: 20px; border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.05);
-    }
+    .etf-block:hover  { border-color:#409EFF; color:#409EFF; }
+    .etf-block.active { background:#409EFF; color:#fff; border-color:#409EFF; font-weight:bold; box-shadow:0 4px 8px rgba(64,158,255,.3); }
+    .chart-container  { width:95%; height:650px; margin:0 auto; background:#fff; padding:20px; border-radius:12px; box-shadow:0 4px 16px rgba(0,0,0,.05); }
   </style>
 </head>
 <body>
@@ -440,16 +486,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <script>
     var rawData = PLOT_DATA_JSON;
     var layout = {
-      paper_bgcolor: '#fff', plot_bgcolor: '#fff',
-      title: { text: '总体汇总视图', font: {size: 18} },
-      xaxis: {
-        title: '统计日期（YYYY-MM-DD）', type: 'category',
-        tickmode: 'linear', dtick: 30, tickangle: -45, gridcolor: '#f0f0f0'
-      },
-      yaxis: { title: '规模（万份）', gridcolor: '#f0f0f0' },
-      hovermode: 'x unified',
-      legend: { orientation: 'v', x: 1.02, y: 1 },
-      margin: { t: 60, r: 150, b: 80, l: 60 }
+      paper_bgcolor:'#fff', plot_bgcolor:'#fff',
+      title:{ text:'总体汇总视图', font:{size:18} },
+      xaxis:{ title:'统计日期（YYYY-MM-DD）', type:'category', tickmode:'linear', dtick:30, tickangle:-45, gridcolor:'#f0f0f0' },
+      yaxis:{ title:'规模（万份）', gridcolor:'#f0f0f0' },
+      hovermode:'x unified',
+      legend:{ orientation:'v', x:1.02, y:1 },
+      margin:{ t:60, r:150, b:80, l:60 }
     };
     Plotly.newPlot('chart', rawData, layout);
     var tabsDiv = document.getElementById('tabs');
@@ -459,19 +502,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     btnAll.onclick = function() {
       document.querySelectorAll('.etf-block').forEach(b => b.classList.remove('active'));
       this.classList.add('active');
-      Plotly.restyle('chart', {visible: true});
-      Plotly.relayout('chart', {title: '总体汇总视图'});
+      Plotly.restyle('chart', {visible:true});
+      Plotly.relayout('chart', {title:'总体汇总视图'});
     };
     tabsDiv.appendChild(btnAll);
-    rawData.forEach(function(trace, index) {
+    rawData.forEach(function(trace, idx) {
       var btn = document.createElement('div');
       btn.className = 'etf-block';
       btn.textContent = trace.name.split('(')[0];
       btn.onclick = function() {
         document.querySelectorAll('.etf-block').forEach(b => b.classList.remove('active'));
         this.classList.add('active');
-        var mask = rawData.map(function(_, i) { return i === index; });
-        Plotly.update('chart', {visible: mask}, {title: trace.name + ' 规模走势'});
+        var mask = rawData.map(function(_, i){ return i === idx; });
+        Plotly.update('chart', {visible:mask}, {title:trace.name+' 规模走势'});
       };
       tabsDiv.appendChild(btn);
     });
@@ -485,7 +528,6 @@ def generate_html(plot_data, output_path, completed=True):
     date_range = f'{all_dates[0]} ~ {all_dates[-1]}' if all_dates else '2020年至今'
     if not completed:
         date_range += '（下载中）'
-
     html = (HTML_TEMPLATE
             .replace('PLOT_DATA_JSON', json.dumps(plot_data, ensure_ascii=False))
             .replace('DATA_RANGE', date_range))
@@ -494,23 +536,38 @@ def generate_html(plot_data, output_path, completed=True):
     print(f'✅ HTML 已生成：{output_path}')
 
 
-# ── 8. 主流程 ──────────────────────────────────────────────────────────────────
+# ── 10. 主流程 ─────────────────────────────────────────────────────────────────
 
 def main():
     print('=' * 60)
-    print('  上交所宽基 ETF 规模监控 - 数据采集中...')
-    print('  提示：随时按 Ctrl+C 可中断并保存进度，下次运行自动续传')
+    print('  上交所宽基 ETF 规模监控')
     print('=' * 60)
 
-    results, completed = collect_trading_days()
+    # ── 自动判断模式 ──────────────────────────────────────────────────────────
+    if history_is_complete():
+        # 历史数据完整 → 增量更新
+        results, new_count = incremental_update()
+        completed = True
+        if new_count == 0 and results:
+            # 无新数据且文件存在，询问是否重新生成输出文件
+            print('\n是否重新生成 HTML / Excel？(y/n，默认 n)', end=' ')
+            try:
+                ans = input().strip().lower()
+            except Exception:
+                ans = 'n'
+            if ans != 'y':
+                print('跳过生成，退出。')
+                return
+    else:
+        # 历史尚未完整 → 历史下载（含续传）
+        results, completed = collect_history()
 
     if not results:
-        print('\n❌ 未获取到任何数据，请检查网络后重试。')
+        print('\n❌ 无数据，请检查网络后重试。')
         return
 
-    print(f'\n共 {len(results)} 个交易日，开始生成输出文件...\n')
+    print(f'\n共 {len(results)} 个交易日，生成输出文件...\n')
     plot_data = build_plot_data(results)
-
     generate_html(plot_data, OUTPUT_HTML, completed=completed)
     generate_excel(plot_data, OUTPUT_EXCEL)
 
