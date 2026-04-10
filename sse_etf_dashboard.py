@@ -22,6 +22,7 @@ import requests
 import json
 import time
 import os
+import re
 import webbrowser
 from datetime import datetime, timedelta
 from openpyxl import Workbook
@@ -42,7 +43,7 @@ ETF_MAP = {
     '588080': '易方达上证科创板50ETF',
 }
 
-TARGET_DAYS      = 1520
+TARGET_DAYS      = 1500
 CUTOFF_DATE      = datetime(2020, 1, 1)
 OUTPUT_HTML      = 'sse_final_dashboard.html'
 OUTPUT_EXCEL     = 'sse_etf_data.xlsx'
@@ -53,6 +54,23 @@ NET_RETRY_WAIT   = 3
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'Referer':    'https://www.sse.com.cn/',
+    'Accept':     '*/*',
+}
+
+
+# 上证指数配置
+SHINDEX_CHECKPOINT = 'shindex_checkpoint.json'   # 上证指数独立 checkpoint
+SHINDEX_SOHU_URL   = (
+    'http://q.stock.sohu.com/hisHq'
+    '?code=zs_000001'
+    '&start=20200101'
+    '&end=99991231'
+    '&stat=1&order=D&period=d'
+    '&callback=historySearchHandler&rt=jsonp'
+)
+SHINDEX_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'Referer':    'http://q.stock.sohu.com/',
     'Accept':     '*/*',
 }
 
@@ -460,12 +478,14 @@ def sniff_keys(sample):
     return code_key, val_key
 
 
-def build_plot_data(results):
+def build_plot_data(results, index_prices=None):
     if not results:
         return []
     code_key, val_key = sniff_keys(results[0]['items'][0])
     print(f'字段嗅探 → 代码: {code_key}  |  数值: {val_key}')
     plot_data = []
+
+    # ── ETF traces（左轴 yaxis） ───────────────────────────────────────────────
     for code, name in ETF_MAP.items():
         dates, values = [], []
         for day in results:
@@ -480,8 +500,135 @@ def build_plot_data(results):
             'x': [p[0] for p in pairs], 'y': [p[1] for p in pairs],
             'name': f'{name}({code})', 'mode': 'lines+markers',
             'line': {'width': 2.5}, 'marker': {'size': 6}, 'connectgaps': False,
+            'yaxis': 'y',   # 左轴
         })
+
+    # ── 上证指数 trace（右轴 yaxis2） ─────────────────────────────────────────
+    if index_prices:
+        # 只保留与 ETF 数据日期范围重叠的部分，避免图表过宽
+        all_etf_dates = {d for t in plot_data for d in t['x']}
+        if all_etf_dates:
+            min_date = min(all_etf_dates)
+            max_date = max(all_etf_dates)
+            idx_pairs = sorted(
+                [(d, v) for d, v in index_prices.items() if min_date <= d <= max_date],
+                key=lambda x: x[0]
+            )
+        else:
+            idx_pairs = sorted(index_prices.items())
+
+        if idx_pairs:
+            plot_data.append({
+                'x':    [p[0] for p in idx_pairs],
+                'y':    [p[1] for p in idx_pairs],
+                'name': '上证指数(000001)',
+                'mode': 'lines',
+                'line': {'width': 2, 'color': '#e74c3c', 'dash': 'solid'},
+                'yaxis': 'y2',  # 右轴
+                'connectgaps': False,
+                'opacity': 0.85,
+            })
     return plot_data
+
+
+
+
+# ── 上证指数数据抓取 ────────────────────────────────────────────────────────────
+
+def fetch_shindex():
+    """
+    一次性从搜狐接口拉取上证指数 2020-01-01 至今的全量历史数据。
+    返回 dict: {'YYYY-MM-DD': close_price, ...}  或 {} 若失败
+    """
+    try:
+        resp = requests.get(SHINDEX_SOHU_URL, headers=SHINDEX_HEADERS,
+                            timeout=20, proxies={'http': None, 'https': None})
+        resp.raise_for_status()
+        # JSONP 解包：historySearchHandler([{...}])
+        text = resp.text.strip()
+        m    = re.search(r'historySearchHandler\((.+)\)\s*;?\s*$', text, re.DOTALL)
+        if not m:
+            print('  [上证指数] JSONP 解析失败，原始响应前100字符:', text[:100])
+            return {}
+        payload = json.loads(m.group(1))
+        # payload 格式: [{"status":0,"hq":[["2024-01-02","2975.31","2962.85",...], ...]}]
+        hq = payload[0].get('hq', [])
+        # 字段顺序: [日期, 开盘, 收盘, 涨跌额, 涨跌幅%, 最低, 最高, 成交量, 成交额, 换手率]
+        result = {}
+        for row in hq:
+            if len(row) >= 3:
+                date_str = row[0]   # YYYY-MM-DD
+                try:
+                    close = float(str(row[2]).replace(',', ''))
+                    result[date_str] = close
+                except (ValueError, TypeError):
+                    pass
+        print(f'  [上证指数] 获取 {len(result)} 个交易日收盘点位')
+        return result
+    except Exception as e:
+        print(f'  [上证指数] 请求失败: {e}')
+        return {}
+
+
+def load_shindex_checkpoint():
+    """读取上证指数本地缓存，返回 {date: close} 字典。"""
+    if not os.path.exists(SHINDEX_CHECKPOINT):
+        return {}
+    try:
+        with open(SHINDEX_CHECKPOINT, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        prices = data.get('prices', {})
+        print(f'  [上证指数] 本地缓存：{len(prices)} 个交易日，最新 {max(prices) if prices else "无"}')
+        return prices
+    except Exception:
+        return {}
+
+
+def save_shindex_checkpoint(prices):
+    """原子写入上证指数缓存。"""
+    if not prices:
+        return
+    tmp = SHINDEX_CHECKPOINT + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump({
+            'count':    len(prices),
+            'latest':   max(prices),
+            'earliest': min(prices),
+            'saved_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'prices':   prices,
+        }, f, ensure_ascii=False)
+    os.replace(tmp, SHINDEX_CHECKPOINT)
+
+
+def get_shindex_data():
+    """
+    智能获取上证指数数据：
+    - 本地有缓存且最新日期为今天 → 直接用缓存
+    - 否则 → 重新从搜狐拉取全量并更新缓存
+    返回 {'YYYY-MM-DD': close_price} 字典
+    """
+    cached = load_shindex_checkpoint()
+    today  = today_str()
+    latest = max(cached) if cached else None
+
+    # 搜狐接口一次返回全量，直接重拉即可（通常<1秒）
+    if latest and latest >= today:
+        print(f'  [上证指数] 数据已是最新（{latest}），使用本地缓存。')
+        return cached
+
+    print(f'  [上证指数] 从搜狐接口拉取最新数据...')
+    fresh = fetch_shindex()
+    if fresh:
+        # 合并新旧（以防搜狐接口覆盖不完整）
+        cached.update(fresh)
+        save_shindex_checkpoint(cached)
+        return cached
+    elif cached:
+        print(f'  [上证指数] 接口失败，使用本地缓存（最新 {latest}）。')
+        return cached
+    else:
+        print(f'  [上证指数] 无法获取数据，跳过上证指数。')
+        return {}
 
 
 # ── 8. Excel 导出 ──────────────────────────────────────────────────────────────
@@ -507,7 +654,7 @@ def sc(cell, font=None, fill=None, alignment=None, number_format=None, border=No
     if border:        cell.border        = border
 
 
-def generate_excel(plot_data, output_path):
+def generate_excel(plot_data, output_path, index_prices=None):
     wb        = Workbook()
     all_dates = sorted({d for t in plot_data for d in t['x']})
     etf_names = [t['name'] for t in plot_data]
@@ -570,8 +717,32 @@ def generate_excel(plot_data, output_path):
         ws2.column_dimensions[get_column_letter(ci)].width = w
     ws2.freeze_panes = 'A3'
 
+    # Sheet3 上证指数
+    if index_prices:
+        ws3        = wb.create_sheet('上证指数')
+        idx_headers = ['统计日期', '收盘点位']
+        ws3.merge_cells(start_row=1, start_column=1, end_row=1, end_column=2)
+        sc(ws3.cell(row=1, column=1, value='上证指数（000001）历史收盘点位'),
+           font=HDR_FONT, fill=HDR_FILL, alignment=CENTER)
+        ws3.row_dimensions[1].height = 30
+        for ci, h in enumerate(idx_headers, start=1):
+            sc(ws3.cell(row=2, column=ci, value=h),
+               font=SUB_FONT, fill=SUB_FILL, alignment=CENTER, border=BORDER)
+        ws3.row_dimensions[2].height = 22
+        for irow, (date, price) in enumerate(
+                sorted(index_prices.items(), reverse=True), start=3):
+            fill = ALT_FILL if irow % 2 == 0 else None
+            sc(ws3.cell(row=irow, column=1, value=date),
+               font=BODY_FONT, fill=fill, alignment=CENTER, border=BORDER)
+            sc(ws3.cell(row=irow, column=2, value=price),
+               font=BODY_FONT, fill=fill, alignment=CENTER,
+               number_format='#,##0.00', border=BORDER)
+        ws3.column_dimensions['A'].width = 16
+        ws3.column_dimensions['B'].width = 18
+        ws3.freeze_panes = 'A3'
+
     wb.save(output_path)
-    print(f'✅ Excel 已生成：{output_path}  （共 {row-3} 行明细）')
+    print(f'✅ Excel 已生成：{output_path}  （共 {row-3} 行 ETF 明细）')
 
 
 # ── 9. HTML 生成 ───────────────────────────────────────────────────────────────
@@ -606,10 +777,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       paper_bgcolor:'#fff', plot_bgcolor:'#fff',
       title:{ text:'总体汇总视图', font:{size:18} },
       xaxis:{ title:'统计日期（YYYY-MM-DD）', type:'category', tickmode:'linear', dtick:30, tickangle:-45, gridcolor:'#f0f0f0' },
-      yaxis:{ title:'规模（万份）', gridcolor:'#f0f0f0' },
+      yaxis:{ title:'ETF 规模（万份）', gridcolor:'#f0f0f0', side:'left' },
+      yaxis2:{
+        title:'上证指数（点）',
+        overlaying:'y',
+        side:'right',
+        showgrid:false,
+        tickfont:{ color:'#e74c3c' },
+        titlefont:{ color:'#e74c3c' }
+      },
       hovermode:'x unified',
-      legend:{ orientation:'v', x:1.02, y:1 },
-      margin:{ t:60, r:150, b:80, l:60 }
+      legend:{ orientation:'v', x:1.08, y:1 },
+      margin:{ t:60, r:200, b:80, l:70 }
     };
     Plotly.newPlot('chart', rawData, layout);
     var tabsDiv = document.getElementById('tabs');
@@ -640,7 +819,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </html>"""
 
 
-def generate_html(plot_data, output_path, completed=True):
+def generate_html(plot_data, output_path, completed=True, index_prices=None):
     all_dates  = sorted({d for t in plot_data for d in t['x']})
     date_range = f'{all_dates[0]} ~ {all_dates[-1]}' if all_dates else '2020年至今'
     if not completed:
@@ -703,9 +882,14 @@ def main():
         return
 
     print(f'\n共 {len(results)} 个交易日，生成输出文件...\n')
-    plot_data = build_plot_data(results)
-    generate_html(plot_data, OUTPUT_HTML, completed=completed)
-    generate_excel(plot_data, OUTPUT_EXCEL)
+
+    # 获取上证指数数据（独立接口，不影响 ETF 下载流程）
+    print('▶  获取上证指数历史数据...')
+    index_prices = get_shindex_data()
+
+    plot_data = build_plot_data(results, index_prices=index_prices)
+    generate_html(plot_data, OUTPUT_HTML, completed=completed, index_prices=index_prices)
+    generate_excel(plot_data, OUTPUT_EXCEL, index_prices=index_prices)
 
     if completed:
         webbrowser.open(OUTPUT_HTML)
