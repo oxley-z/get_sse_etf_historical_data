@@ -1,0 +1,26 @@
+
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>上交所 Top 5 ETF (近5交易日)</title>
+        <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+        <style>body { background-color: #111111; color: white; font-family: sans-serif; }</style>
+    </head>
+    <body>
+        <h2 style="text-align: center; margin-top: 20px; font-weight: normal;">上交所 Top 5 ETF 近5个交易日规模监控</h2>
+        <div id="chart" style="width:90%; height:700px; margin: 0 auto;"></div>
+        <script>
+            var data = [{"x":["2026-04-01","2026-04-02","2026-04-03","2026-04-07","2026-04-08"],"y":[null,null,null,null,null],"name":"undefined(510010)","mode":"lines+markers","line":{"width":3}},{"x":["2026-04-01","2026-04-02","2026-04-03","2026-04-07","2026-04-08"],"y":[null,null,null,null,null],"name":"undefined(510020)","mode":"lines+markers","line":{"width":3}},{"x":["2026-04-01","2026-04-02","2026-04-03","2026-04-07","2026-04-08"],"y":[null,null,null,null,null],"name":"undefined(510030)","mode":"lines+markers","line":{"width":3}},{"x":["2026-04-01","2026-04-02","2026-04-03","2026-04-07","2026-04-08"],"y":[null,null,null,null,null],"name":"undefined(510040)","mode":"lines+markers","line":{"width":3}},{"x":["2026-04-01","2026-04-02","2026-04-03","2026-04-07","2026-04-08"],"y":[null,null,null,null,null],"name":"undefined(510050)","mode":"lines+markers","line":{"width":3}}];
+            var layout = {
+                template: 'plotly_dark',
+                paper_bgcolor: '#111111',
+                plot_bgcolor: '#111111',
+                xaxis: {title: '日期', tickangle: -45},
+                yaxis: {title: '市值 (亿元)'},
+                hovermode: 'x unified',
+                legend: {orientation: "h", yanchor: "bottom", y: 1.02, xanchor: "right", x: 1}
+            };
+            Plotly.newPlot('chart', data, layout);
+        </script>
+    </body>
+    </html>

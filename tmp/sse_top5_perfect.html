@@ -1,0 +1,22 @@
+
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>上交所 Top 5 ETF 规模监控</title>
+        <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+        <style>body { background-color: #111111; color: white; font-family: sans-serif; }</style>
+    </head>
+    <body>
+        <h2 style="text-align: center; margin-top: 20px; font-weight: normal;">上交所 Top 5 ETF 近5个交易日规模监控</h2>
+        <div id="chart" style="width:90%; height:700px; margin: 0 auto;"></div>
+        <script>
+            var data = [{"x":["2026-04-01","2026-04-02","2026-04-03","2026-04-07","2026-04-08"],"y":[8417082.05,8344982.05,8361682.05,8370582.05,8363382.05],"name":"医疗ETF(512170)","mode":"lines+markers","line":{"width":3}},{"x":["2026-04-01","2026-04-02","2026-04-03","2026-04-07","2026-04-08"],"y":[8253975.95,8320675.95,8320675.95,8320675.95,8320675.95],"name":"恒指科技(513180)","mode":"lines+markers","line":{"width":3}},{"x":["2026-04-01","2026-04-02","2026-04-03","2026-04-07","2026-04-08"],"y":[8039548,8051348,8051348,8051348,8033948],"name":"恒生互联(513330)","mode":"lines+markers","line":{"width":3}},{"x":["2026-04-01","2026-04-02","2026-04-03","2026-04-07","2026-04-08"],"y":[8039034.7,8039134.7,8039134.7,8039134.7,8008834.7],"name":"恒生科技(513130)","mode":"lines+markers","line":{"width":3}},{"x":["2026-04-01","2026-04-02","2026-04-03","2026-04-07","2026-04-08"],"y":[7112523.54,7114263.54,7119843.54,7119423.54,7054263.54],"name":"券商ETF(512000)","mode":"lines+markers","line":{"width":3}}];
+            var layout = {
+                template: 'plotly_dark', paper_bgcolor: '#111111', plot_bgcolor: '#111111',
+                xaxis: {title: '日期', tickangle: -45}, yaxis: {title: '规模 (亿元/万份)'},
+                hovermode: 'x unified', legend: {orientation: "h", yanchor: "bottom", y: 1.02, xanchor: "right", x: 1}
+            };
+            Plotly.newPlot('chart', data, layout);
+        </script>
+    </body>
+    </html>
